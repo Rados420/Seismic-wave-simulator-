@@ -1,0 +1,24 @@
+[project]
+name = "fasim"
+version = "0.0.1"
+description = "Prototype 2-D elastic tunnel-seismic simulator for first-arrival picking research"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "deepwave>=0.0.27",
+    "scikit-fmm",
+    "h5py",
+    "matplotlib",
+    "pyyaml",
+    "jupyterlab",
+    "ipykernel",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["fasim"]

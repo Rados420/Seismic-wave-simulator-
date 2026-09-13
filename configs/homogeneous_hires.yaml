@@ -1,0 +1,22 @@
+# Same as homogeneous.yaml but dx = 0.1 m and a 1.2 kHz Ricker (closer to the powerhammer spectrum). ~8x slower.
+name: homogeneous_hires
+seed: 0
+domain: {z_min: -10.0, z_max: 70.0, x_min: -25.0, x_max: 25.0, dx: 0.1, pml_width: 20}
+rock: {vp: 5800.0, vp_vs: 1.75, rho: null, texture_std: 0.0, texture_corr_len: 2.0}
+tunnel: {enabled: true, half_width: 5.25, z_start: null, z_face: 60.0, edz_thickness: 1.0, edz_factor: 0.7, edz_rho_factor: 0.9}
+structure: {family: homogeneous}
+acquisition:
+  receivers:
+    - {z: 7.0, side: right, embed: 1.5, name: RCV1}
+    - {z: 2.0, side: right, embed: 1.5, name: RCV2}
+    - {z: 7.0, side: left,  embed: 1.5, name: RCV3}
+    - {z: 2.0, side: left,  embed: 1.5, name: RCV4}
+  shot_side: right
+  shot_z0: 22.0
+  shot_dz: 1.5
+  n_shots: 24
+  shot_embed: 1.5
+source: {kind: force, direction_deg: 0.0, peak_freq: 1200.0, amplitude: 1.0}
+sim: {dt: 20.833e-6, record_ms: 30.0, accuracy: 4, device: cpu, shot_chunk: 8, snapshots_ms: [2.0, 5.0, 8.0], snapshot_shot: 12}
+labels: {picker: amplitude_threshold, rel_threshold: 0.02, threshold_ref: window, ref_window_ms: 2.0, component: x, search_before_ms: 1.0, sta_ms: 0.1, lta_ms: 1.0, trigger: 5.0}
+post: {q: null, spreading_exponent: 0.0}
