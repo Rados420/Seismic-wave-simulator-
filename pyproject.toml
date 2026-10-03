@@ -21,4 +21,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["fasim"]
+packages = ["fasim", "fasim.gen"]
+
+[tool.setuptools.package-data]
+"fasim.gen" = ["defaults.yaml"]

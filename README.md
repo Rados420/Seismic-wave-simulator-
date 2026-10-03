@@ -36,3 +36,24 @@ CLI overrides: `--shots N --dx --freq --source force|pressure --no-tunnel
 
 Re-picking without re-simulating: `python repick.py runs/homogeneous --threshold-ref gather --suffix _gatherref`
 (add `--write-h5` to overwrite the stored labels) or interactively in `notebooks/00_explore_run.ipynb`.
+
+## Dataset generator V1 (`fasim/gen`, `generate.py`)
+
+Implements `docs/dataset_design_v1.md`. Metaparameters live in `fasim/gen/defaults.yaml`
+(fixed values or distributions); override with `--meta my.yaml` or `--set key.path=value`.
+
+```bash
+.venv/bin/python generate.py sample --seed 0 1 2            # drawn parameters, no simulation
+.venv/bin/python generate.py paint  --seed 2 --dims 2       # build and plot both wall variants, no simulation
+.venv/bin/python generate.py paint  --seed 2 --dims 3 --set grid.dx_3d=0.4
+.venv/bin/python generate.py run    --seeds 2 --dims 2      # simulate wall x source, write runs/gen/2d/draw_000002.h5
+.venv/bin/python generate.py compare runs/gen/2d/draw_000002.h5 --rcv 0 1 --comp n
+```
+
+Quick, cheap test runs: `--set grid.dx_2d=0.2 --set acquisition.n_shots=6 --set record.length_ms=20`.
+
+Per draw, one HDF5 file: `params_json` (every drawn value and field seed, enough to rebuild the
+models), `meta_json`, `geometry/` (receiver and shot positions, impact directions, offsets),
+and `wall_<concrete|bare>/` with the models (float16), the eikonal traveltimes and one group per
+source (`data[shot, rcv, comp, t]` with comps p, s, n[, v], `t`, `wavelet`). `index.jsonl` in the
+output directory lists the draws with their main parameters for slicing.

@@ -1,0 +1,146 @@
+# Default metaparameters of the V1 dataset generator (see docs/dataset_design_v1.md).
+#
+# A scalar is a fixed value. A dict with a `dist` key is a distribution, sampled
+# independently for every draw:
+#   {dist: uniform, low, high}          {dist: loguniform, low, high}
+#   {dist: normal, mean, std}           {dist: lognormal, median, sigma}
+#   {dist: randint, low, high}          (inclusive)
+#   {dist: poisson, lam}                {dist: beta, a, b[, low, high]}
+#   {dist: choice, values[, weights]}
+# Any distribution may carry `clip: [lo, hi]`.
+# Override from the command line with  --set path.to.key=value  (value parsed as YAML).
+#
+# Coordinates: s = along the tunnel (face direction +), n = into the rock normal to the
+# receiver wall (wall at n ~ 0, tunnel interior n < 0), v = vertical (3-D only).
+# 2-D runs are the v = 0 plane of the 3-D description: vertical curvature and heights are ignored.
+
+dims: 2
+seed_base: 0
+
+enumerate:                       # simulated for every draw, everything else shared
+  walls: [concrete, bare]
+  sources: [explosive, impact]
+
+grid:
+  dx_2d: 0.1
+  dx_3d: 0.25
+  pml_width: 20
+  accuracy: 4
+  vs_floor: 1000.0               # m/s, slowest solid allowed (clay fill, fault cores)
+  min_cells_per_wavelength: 4    # at 2.5 x peak frequency; the peak frequency is capped to respect it
+
+record:
+  dt: 20.833e-6                  # s, 48 kHz like the field data
+  length_ms: 30.0
+
+domain:                          # one-wall box: only the rock behind the receiver wall
+  behind_first_receiver: 8.0     # m of rock before the first receiver (along s)
+  ahead_of_face: 15.0            # m of rock beyond the face
+  depth_into_rock: 25.0          # m from the wall into the rock
+  cavity_margin: 2.0             # m of tunnel interior kept in the box
+  vertical_half: 15.0            # 3-D: +- m around the springline
+
+tunnel:
+  radius: 5.25                   # m, circular cross-section
+  face_distance: 10.0            # m from the last shot hole to the face
+  curvature:                     # (vertical, horizontal) in 1/m from a 2-D normal; R = 1/|k|
+    std_vertical: 0.002
+    std_horizontal: 0.002
+    correlation: 0.0
+  roughness:                     # excavation surface of the rock, shared by both wall variants
+    amplitude: {dist: loguniform, low: 0.02, high: 0.3}     # m rms
+    corr_length: {dist: uniform, low: 0.3, high: 3.0}       # m along the wall
+    overbreak_bias: {dist: uniform, low: 0.0, high: 1.0}    # mean outward shift in units of amplitude
+
+concrete:                        # wall variant "concrete": smooth inner surface, fills the rough rock surface
+  thickness: {dist: uniform, low: 0.1, high: 0.4}           # m, minimum lining thickness
+  vp: {dist: uniform, low: 3500.0, high: 4500.0}
+  vp_vs: {dist: uniform, low: 1.6, high: 1.7}
+  rho: {dist: uniform, low: 2300.0, high: 2450.0}
+  noise_std: {dist: uniform, low: 0.01, high: 0.05}         # relative velocity noise inside the lining
+  noise_corr_length: 0.3
+
+acquisition:                     # receivers and shot holes on the same wall
+  n_receivers: {dist: randint, low: 2, high: 8}
+  receiver_spacing: {dist: uniform, low: 1.0, high: 5.0}    # m
+  gap: {dist: uniform, low: 8.0, high: 30.0}                # m, last receiver -> first shot hole
+  n_shots: 24
+  shot_spacing: {dist: uniform, low: 1.0, high: 2.0}        # m, mean spacing
+  receiver_embed: 1.5            # m into the rock
+  shot_embed: 1.5
+  height: 0.0                    # m above the springline (3-D)
+  jitter_along: {dist: uniform, low: 0.0, high: 0.2}        # m std of position deviations along s
+  jitter_depth: {dist: uniform, low: 0.0, high: 0.2}        # m std of embedment deviations
+  jitter_height: {dist: uniform, low: 0.0, high: 0.3}       # m std of height deviations (3-D)
+  virtual_receivers:             # dense line on the receiver wall, stored after the real receivers
+    enabled: false
+    spacing: 1.0                 # m, from the first receiver to the last shot hole
+
+sources:
+  explosive:                     # pressure source
+    peak_freq: {dist: uniform, low: 500.0, high: 1500.0}    # Hz, Ricker
+    amplitude: 1.0
+  impact:                        # force source, nominally along the wall normal
+    peak_freq: {dist: uniform, low: 500.0, high: 2000.0}
+    amplitude: 1.0
+    direction_jitter_deg: {dist: uniform, low: 0.0, high: 20.0}   # cone half-angle; each shot draws its own direction
+
+rock:
+  lithologies:                   # weight, in-situ vp [m/s], vp/vs, Q_P (stored, applied in post-processing)
+    granite:         {weight: 3.0, vp: [5000, 6000], vp_vs: [1.65, 1.95], q: [15, 60]}
+    gneiss:          {weight: 2.0, vp: [4800, 6200], vp_vs: [1.65, 1.90], q: [15, 60], fabric: foliated}
+    schist:          {weight: 1.5, vp: [4000, 5500], vp_vs: [1.70, 1.95], q: [10, 40], fabric: foliated}
+    limestone:       {weight: 1.5, vp: [4500, 6200], vp_vs: [1.75, 1.95], q: [20, 100], karst: true}
+    sandstone_shale: {weight: 1.0, vp: [3000, 4800], vp_vs: [1.75, 2.10], q: [10, 40], fabric: layered}
+    volcanic:        {weight: 1.0, vp: [4000, 5800], vp_vs: [1.70, 1.90], q: [15, 60]}
+  quality: {dist: beta, a: 2.0, b: 2.0}        # rock-mass quality in [0, 1], 1 = intact
+  quality_effects:
+    vp_reduction_max: 0.15       # vp x (1 - 0.15 (1 - q))
+    vs_reduction_max: 0.30       # vs reduced more (open fractures)
+    edz_thickness: [0.3, 2.0]    # m, [q = 1, q = 0]
+    edz_factor: [0.85, 0.6]      # velocity multiplier, [q = 1, q = 0]
+  density_scatter: 0.03          # relative std of density around Gardner
+  fabric_anisotropy:             # texture correlation length along / across the fabric plane
+    foliated: {dist: uniform, low: 1.5, high: 3.0}
+    layered: {dist: uniform, low: 4.0, high: 10.0}
+  structures:
+    count: {dist: poisson, lam: 1.5}
+    max_count: 5
+    in_aperture_prob: 0.6        # structure anchored inside the receiver-shot zone (near the wall)
+    types:
+      fault_zone:
+        weight: 3.0
+        width: {dist: lognormal, median: 1.0, sigma: 1.0, clip: [0.05, 10.0]}   # m, core
+        contrast: {dist: uniform, low: 0.1, high: 0.5}                          # velocity reduction in the core
+        halo_factor: {dist: uniform, low: 1.0, high: 4.0}                       # damage zone width / core width
+      dyke:
+        weight: 1.0
+        width: {dist: lognormal, median: 0.8, sigma: 0.6, clip: [0.1, 5.0]}
+        contrast: {dist: uniform, low: -0.15, high: 0.10}                       # negative = faster than host
+      interface:                 # half-space of a second lithology drawn from the same table
+        weight: 2.0
+      karst:                     # carbonate hosts only
+        weight: 1.0
+        count: {dist: randint, low: 1, high: 6}
+        radius: {dist: lognormal, median: 0.8, sigma: 0.6, clip: [0.2, 4.0]}
+        fill: {dist: choice, values: [empty, clay], weights: [0.4, 0.6]}
+      gradient:                  # linear velocity decrease across the box (weathering front)
+        weight: 1.0
+        contrast: {dist: uniform, low: 0.05, high: 0.2}
+  texture:                       # von Karman, multiplicative on vp and vs
+    large:
+      std: {dist: uniform, low: 0.02, high: 0.08}
+      corr_length: {dist: loguniform, low: 1.0, high: 20.0}
+      hurst: {dist: uniform, low: 0.1, high: 0.3}
+    small:
+      std: {dist: uniform, low: 0.0, high: 0.03}
+      corr_length: {dist: uniform, low: 0.2, high: 0.6}
+      hurst: 0.2
+
+labels:
+  eikonal: true                  # fast-marching traveltime per wall variant
+
+storage:
+  dtype: float32                 # float16 halves the size
+  models: true                   # store vp, vs, rho, labels per wall variant (float16)
+  compression: 4                 # gzip level, 0 = off
