@@ -58,14 +58,17 @@ def sample_acquisition(meta: dict, rng) -> dict:
     j_al, j_dp, j_ht = (draw(a[k], rng) for k in ("jitter_along", "jitter_depth", "jitter_height"))
     h0 = draw(a["height"], rng)
 
-    def point(s_nom, embed_nom):
-        return {"s": float(s_nom + j_al * rng.standard_normal()),
-                "embed": float(max(0.3, embed_nom + j_dp * rng.standard_normal())),
-                "height": float(h0 + j_ht * rng.standard_normal())}
+    # per-position deviations in their own streams: changing a count does not shift other draws
+    rng_r, rng_s = (np.random.default_rng(_field_seed(rng)) for _ in range(2))
 
-    rcv = [point(i * sp_r, a["receiver_embed"]) for i in range(n_r)]
+    def point(g, s_nom, embed_nom):
+        return {"s": float(s_nom + j_al * g.standard_normal()),
+                "embed": float(max(0.3, embed_nom + j_dp * g.standard_normal())),
+                "height": float(h0 + j_ht * g.standard_normal())}
+
+    rcv = [point(rng_r, i * sp_r, a["receiver_embed"]) for i in range(n_r)]
     s_first_shot = (n_r - 1) * sp_r + gap
-    shots = [point(s_first_shot + k * sp_s, a["shot_embed"]) for k in range(n_s)]
+    shots = [point(rng_s, s_first_shot + k * sp_s, a["shot_embed"]) for k in range(n_s)]
     virtual = []
     vr = a.get("virtual_receivers", {})
     if vr.get("enabled"):
@@ -109,11 +112,12 @@ def sample_sources(meta: dict, rng, n_shots: int) -> dict:
     s = meta["sources"]
     ex = {"peak_freq": draw(s["explosive"]["peak_freq"], rng), "amplitude": draw(s["explosive"]["amplitude"], rng)}
     im = s["impact"]
-    cone = draw(im["direction_jitter_deg"], rng)
+    f_im, a_im, cone = (draw(im[k], rng) for k in ("peak_freq", "amplitude", "direction_jitter_deg"))
+    shot_rng = np.random.default_rng(_field_seed(rng))     # per-shot draws last, in their own stream
     ca = np.cos(np.deg2rad(cone))
-    polar = np.rad2deg(np.arccos(1.0 - rng.uniform(size=n_shots) * (1.0 - ca)))   # uniform on the cone cap
-    azim = rng.uniform(0.0, 360.0, size=n_shots)
-    imp = {"peak_freq": draw(im["peak_freq"], rng), "amplitude": draw(im["amplitude"], rng),
+    polar = np.rad2deg(np.arccos(1.0 - shot_rng.uniform(size=n_shots) * (1.0 - ca)))   # uniform on the cone cap
+    azim = shot_rng.uniform(0.0, 360.0, size=n_shots)
+    imp = {"peak_freq": f_im, "amplitude": a_im,
            "direction_jitter_deg": cone, "polar_deg": polar.tolist(), "azimuth_deg": azim.tolist()}
     return {"explosive": ex, "impact": imp}
 
