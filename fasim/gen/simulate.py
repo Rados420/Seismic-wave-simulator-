@@ -80,7 +80,9 @@ def propagate(model: dict, dom: Domain, shot_pos: np.ndarray, rcv_pos: np.ndarra
     dt = float(meta["record"]["dt"])
     nt = int(round(meta["record"]["length_ms"] * 1e-3 / dt))
     peak_time = 1.5 / freq
-    wav = ricker(freq, nt, dt, peak_time) * amplitude
+    # Deepwave sources are densities (force / volume, pressure rate per cell): divide by the cell
+    # volume so the physical source strength, and the recorded amplitudes, do not depend on dx
+    wav = ricker(freq, nt, dt, peak_time) * amplitude / dom.dx ** dims
     vp, vs, rho = (torch.tensor(model[k], device=device) for k in ("vp", "vs", "rho"))
     lamb, mu, buoy = vpvsrho_to_lambmubuoyancy(vp, vs, rho)
     names = DW_NAMES[-dims:]

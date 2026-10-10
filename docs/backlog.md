@@ -5,13 +5,20 @@ each; newest first. Mark an item **done** with a one-line outcome instead of del
 
 ## Open
 
+- **EDZ position relative to the sensors dominates the first arrival** (2026-10-10, notebook 01).
+  Removing or thickening the EDZ changes the first-arrival waveform more than any other factor,
+  and a 2 m EDZ delays it by 0.3 ms once sensors sit inside it. The EDZ model (sharp boundary,
+  thickness from rock quality) and the embedment distribution need a closer look before the dataset.
+- **Texture is sampled differently on each grid** (2026-10-10, notebook 01). With von Karman
+  texture, dx 0.1 and 0.2 m both differ from 0.05 m by ~50 % at the first arrival, against 7-32 %
+  without texture. Band-limit the texture to the grid so the medium does not depend on dx.
+- **Random fields depend on the box bounds** (2026-10-10). Changing curvature or domain size moves
+  the box and gives a different texture and roughness realisation, which confounds one-factor tests.
+  Anchor the fields to a fixed frame so a draw keeps its rock when the geometry changes.
 - **Weak P from impact along the wall** (2026-10-09, seed 5). A wall-normal hammer blow sends
-  almost no P along the wall, so the first arrival is barely visible on every component; a 7.5°
-  direction jitter does not change that. Check against real hammer data: if real P is clearly
-  visible, real blows are less wall-normal than modelled (try `sources.impact.direction_jitter_deg=45`).
-- **Concrete changes the first-arrival waveform** (2026-10-09, seed 5). For the explosive source
-  the concrete-minus-bare difference starts at the P arrival and is as large as the P wavelet
-  (component s). Confirm on more draws before treating it as a general effect.
+  almost no P along the wall. Tilting the blows 30° towards the receivers raises the first arrival
+  by 10 dB (notebook 01), so the direction distribution matters a lot. Check against real hammer
+  data whether the P arrival is clearly visible there.
 - **Explosive vs impact amplitudes are not comparable** (2026-10-03). Deepwave uses different
   units for pressure and force sources, so absolute amplitudes differ by orders of magnitude.
   Decide on a normalisation before mixing both in one dataset.
@@ -26,3 +33,12 @@ each; newest first. Mark an item **done** with a one-line outcome instead of del
   record: Joseph Doetsch.
 
 ## Done
+
+- **Concrete changes the first-arrival waveform** (2026-10-10). Confirmed on three draws: 100-168 %
+  waveform change at the first arrival, eikonal unchanged, visibility −3 to −6 dB (notebook 01).
+- **Is the one-wall box big enough?** (2026-10-10). Yes: a box twice as deep and longer gives
+  identical traces for 25 ms records (notebook 01).
+
+- **Source amplitude depended on grid spacing** (2026-10-10). Deepwave sources are densities, so a
+  fixed amplitude got 4× weaker when dx halved in 2-D (−12 dB from 0.2 to 0.1 m). Fixed: the wavelet
+  is divided by the cell volume dx^dims; amplitudes now agree within 0.6 dB across grids.

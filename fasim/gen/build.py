@@ -91,6 +91,19 @@ class Domain:
     dx: float
     shape: tuple
     dims: int
+    hi: np.ndarray | None = None          # requested upper bounds (independent of dx)
+    field_dx: float | None = None         # spacing on which random fields are generated (None = dx)
+
+    def field(self, corr_len: float, hurst: float, seed: int, normal=None, ratio: float = 1.0) -> np.ndarray:
+        """von Karman field on this grid. With field_dx set, the field is generated on a fixed grid of
+        spacing field_dx over the dx-independent bounds and sampled here, so the same draw gives the
+        same rock at every dx (needed for grid-convergence tests)."""
+        if not self.field_dx or abs(self.field_dx - self.dx) < 1e-9 or self.hi is None:
+            return von_karman(self.shape, self.dx, corr_len, hurst, seed, normal=normal, ratio=ratio)
+        fshape = tuple(int(round((h - l) / self.field_dx)) + 2 for l, h in zip(self.origin, self.hi))
+        f = von_karman(fshape, self.field_dx, corr_len, hurst, seed, normal=normal, ratio=ratio)
+        idx = np.meshgrid(*[np.arange(n) * self.dx / self.field_dx for n in self.shape], indexing="ij")
+        return map_coordinates(f, idx, order=1, mode="nearest").astype(np.float32)
 
     def axis(self, i: int) -> np.ndarray:
         return self.origin[i] + self.dx * np.arange(self.shape[i])
@@ -131,7 +144,7 @@ def make_domain(params: dict, meta: dict, dims: int) -> tuple[Domain, TunnelGeom
     dx = float(meta["grid"]["dx_3d" if dims == 3 else "dx_2d"])
     lo, hi = np.array(lo), np.array(hi)
     shape = tuple(int(np.ceil((h - l) / dx)) + 1 for l, h in zip(lo, hi))
-    return Domain(origin=lo, dx=dx, shape=shape, dims=dims), geom
+    return Domain(origin=lo, dx=dx, shape=shape, dims=dims, hi=hi, field_dx=meta["grid"].get("field_dx")), geom
 
 
 # --------------------------------------------------------------------------- #
@@ -214,8 +227,7 @@ def paint_rock(params: dict, meta: dict, dom: Domain, geom: TunnelGeom) -> dict:
     for scale, normal, ratio in (("large", rp["fabric_normal"], h["fabric_ratio"]), ("small", None, 1.0)):
         t = tx[scale]
         if t["std"] > 0:
-            T += t["std"] * von_karman(shape, dom.dx, t["corr_length"], t["hurst"], t["field_seed"],
-                                       normal=normal, ratio=ratio)
+            T += t["std"] * dom.field(t["corr_length"], t["hurst"], t["field_seed"], normal=normal, ratio=ratio)
     vp *= 1.0 + T
     vs *= 1.0 + T
     rho = (gardner_rho(vp) * dens).astype(np.float32)
@@ -238,7 +250,8 @@ def tunnel_geometry_fields(params: dict, dom: Domain, geom: TunnelGeom):
     r = np.sqrt(dn ** 2 + dv ** 2)
     theta = np.arctan2(dv, dn)
     s_lo, s_hi = dom.extent(0)
-    rough = Roughness(params["tunnel"]["roughness"], geom.R, s_lo - 1.0, s_hi + 1.0, min(dom.dx, 0.1))
+    s_lo, s_hi = (dom.origin[0], dom.hi[0]) if dom.hi is not None else (s_lo, s_hi)
+    rough = Roughness(params["tunnel"]["roughness"], geom.R, s_lo - 1.0, s_hi + 1.0, dom.field_dx or min(dom.dx, 0.1))
     r_rock = geom.R + rough(np.broadcast_to(S, r.shape), np.broadcast_to(theta, r.shape))
     before_face = np.broadcast_to(S <= geom.face_s, r.shape)
     return np.broadcast_to(r, dom.shape), np.broadcast_to(r_rock, dom.shape), \
@@ -274,7 +287,7 @@ def build_model(params: dict, meta: dict, dims: int, wall: str, dom: Domain | No
         r_in = float(r_rock[before_face].min()) - c["thickness"]
         conc = excavated & (r >= r_in)
         cavity = excavated & (r < r_in)
-        noise = 1.0 + c["noise_std"] * von_karman(dom.shape, dom.dx, c["noise_corr_length"], 0.5, c["field_seed"])
+        noise = 1.0 + c["noise_std"] * dom.field(c["noise_corr_length"], 0.5, c["field_seed"])
         vp[conc] = c["vp"] * noise[conc]
         vs[conc] = c["vp"] / c["vp_vs"] * noise[conc]
         rho[conc] = c["rho"]

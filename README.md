@@ -57,3 +57,11 @@ models), `meta_json`, `geometry/` (receiver and shot positions, impact direction
 and `wall_<concrete|bare>/` with the models (float16), the eikonal traveltimes and one group per
 source (`data[shot, rcv, comp, t]` with comps p, s, n[, v], `t`, `wavelet`). `index.jsonl` in the
 output directory lists the draws with their main parameters for slicing.
+
+## Experiments
+
+`notebooks/01_factor_influence.ipynb`: one-factor-at-a-time influence of wall, curvature, roughness,
+EDZ, texture, hammer direction, domain size, grid density and 2-D vs 3-D on the simulated gathers,
+with conclusions at the end. Helpers in `fasim/gen/experiments.py` (`run_variant` caches each
+simulation in `runs/experiments/`, `compare` and `fa_visibility` compute the measures).
+Running it from scratch takes about 45 min on an M4 CPU; with the cache it only re-plots.

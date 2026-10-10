@@ -148,3 +148,46 @@ def plot_compare(path_h5, rcv: int = 0, comp: str = "n", out=None, tmax_ms: floa
     fig.savefig(out, dpi=100)
     plt.close(fig)
     return out
+
+
+def plot_pair(ref: dict, var: dict, rcv: int = 0, comp: str = "s", axes=None, names=("reference", "variant"),
+              tmax_ms: float | None = None):
+    """Receiver gather of a reference and a variant run, plus their difference, on the reference scale."""
+    from .experiments import COMP_NAMES
+    ci = COMP_NAMES.index(comp)
+    a = ref["data"][:, rcv, ci].astype(float)
+    nt = min(a.shape[-1], var["data"].shape[-1])
+    a = a[:, :nt]
+    b = var["data"][:, rcv, ci, :nt].astype(float)
+    t = ref["t"][:nt]
+    scale = np.abs(a).max(axis=1, keepdims=True) + 1e-30
+    if axes is None:
+        _, axes = plt.subplots(1, 3, figsize=(15, 3.5), sharey=True)
+    tm = tmax_ms or min(t[-1] * 1e3, np.nanmax(ref["eik"][:, rcv]) * 1e3 + 8)
+    t0 = max(t[0] * 1e3, np.nanmin(ref["eik"][:, rcv]) * 1e3 - 2)
+    _wiggles(axes[0], a / scale, t, ref["eik"][:, rcv], f"{names[0]} ({comp})")
+    _wiggles(axes[1], b / scale, t, var["eik"][:, rcv], f"{names[1]} ({comp})")
+    _wiggles(axes[2], (b - a) / scale, t, ref["eik"][:, rcv], "variant - reference, same scale")
+    off = ref["offset"][:, rcv]
+    for ax in axes:
+        ax.set_xlim(t0, tm)
+    axes[0].set_yticks(len(off) - 1 - np.arange(len(off)))
+    axes[0].set_yticklabels([f"{o:.0f}" for o in off], fontsize=7)
+    axes[0].set_ylabel("offset [m]")
+    return axes
+
+
+def plot_summary(summaries: dict, keys=("|dt_fa| ms", "nrms_fa %", "nrms %"), title: str = ""):
+    """Horizontal bars per experiment for the chosen summary measures."""
+    names = list(summaries)
+    fig, axes = plt.subplots(1, len(keys), figsize=(5 * len(keys), 0.35 * len(names) + 1.2), sharey=True)
+    y = np.arange(len(names))[::-1]
+    for ax, k in zip(np.atleast_1d(axes), keys):
+        ax.barh(y, [summaries[n][k] for n in names], color="tab:blue")
+        ax.set_title(k, fontsize=10)
+        ax.grid(axis="x", alpha=0.3)
+    np.atleast_1d(axes)[0].set_yticks(y)
+    np.atleast_1d(axes)[0].set_yticklabels(names, fontsize=8)
+    fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+    return fig

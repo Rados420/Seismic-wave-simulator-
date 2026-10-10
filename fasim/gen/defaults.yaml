@@ -24,6 +24,7 @@ enumerate:                       # simulated for every draw, everything else sha
 grid:
   dx_2d: 0.1
   dx_3d: 0.25
+  field_dx: null                 # m; generate random fields on this fixed spacing (same rock at every dx). null = dx
   pml_width: 20
   accuracy: 4
   vs_floor: 1000.0               # m/s, slowest solid allowed (clay fill, fault cores)
