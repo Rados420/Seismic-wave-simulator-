@@ -5,6 +5,10 @@ each; newest first. Mark an item **done** with a one-line outcome instead of del
 
 ## Open
 
+- **2-D training data need the line-to-point correction** (2026-10-19, notebook 02). Uncorrected 2-D
+  first arrivals are 0.16-0.39 ms off the 3-D ones; after the half-derivative filter they agree within
+  0.04 ms. 2-D also under-states the amplitude decay with offset (exponent 0.5-1.0 smaller), so decide
+  whether to correct amplitudes too or treat them as augmentation.
 - **EDZ position relative to the sensors dominates the first arrival** (2026-10-10, notebook 01).
   Removing or thickening the EDZ changes the first-arrival waveform more than any other factor,
   and a 2 m EDZ delays it by 0.3 ms once sensors sit inside it. The EDZ model (sharp boundary,
@@ -33,6 +37,10 @@ each; newest first. Mark an item **done** with a one-line outcome instead of del
   record: Joseph Doetsch.
 
 ## Done
+
+- **How different is 2-D from the in-plane cut of 3-D?** (2026-10-19, notebook 02). Same timing after the
+  line-to-point correction (≤ 0.04 ms); waveforms 44-75 % different at the first arrival; 3-D amplitude
+  decays faster with offset; 3-D costs ~1300× more per shot.
 
 - **Concrete changes the first-arrival waveform** (2026-10-10). Confirmed on three draws: 100-168 %
   waveform change at the first arrival, eikonal unchanged, visibility −3 to −6 dB (notebook 01).

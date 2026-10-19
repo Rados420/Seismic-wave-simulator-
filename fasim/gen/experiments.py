@@ -199,3 +199,55 @@ def table(summaries: dict, fmt: str = "{:.2f}") -> str:
     for n in names:
         lines.append(f"| {n} | " + " | ".join(fmt.format(summaries[n][c]) for c in cols) + " |")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 2-D vs 3-D
+def line_to_point(res: dict) -> dict:
+    """Copy of a 2-D result with the line-source -> point-source waveform correction applied.
+
+    A 2-D simulation is the response to a line source. Its waveforms differ from a point source by
+    the half-derivative filter (i w)^(1/2) (45 deg phase shift, sharper pulse); the remaining
+    amplitude factor 1/sqrt(r) does not matter for shape comparisons, which normalise each trace.
+    """
+    d = res["data"].astype(np.float64)
+    nt = d.shape[-1]
+    dt = float(res["t"][1] - res["t"][0])
+    w = 2 * np.pi * np.fft.rfftfreq(2 * nt, dt)
+    D = np.fft.rfft(d, n=2 * nt, axis=-1) * np.sqrt(1j * w)
+    out = dict(res)
+    out["data"] = np.fft.irfft(D, n=2 * nt, axis=-1)[..., :nt].astype(np.float32)
+    return out
+
+
+def compare_shapes(ref: dict, var: dict, comps=("s", "n")) -> list[dict]:
+    """Like `compare`, but each window is normalised to unit RMS first, so only waveform shape and
+    timing are compared (2-D and 3-D absolute amplitudes are not comparable). Also returns the raw
+    first-arrival RMS of both, for amplitude-versus-offset fits."""
+    dt = float(ref["t"][1] - ref["t"][0])
+    nt = min(ref["data"].shape[-1], var["data"].shape[-1])
+    rows = []
+    for c in comps:
+        ci = COMP_NAMES.index(c)
+        for s in range(ref["data"].shape[0]):
+            for r in range(ref["data"].shape[1]):
+                a, b = ref["data"][s, r, ci, :nt].astype(float), var["data"][s, r, ci, :nt].astype(float)
+                w = fa_window(ref, s, r)[:nt]
+                rms_a, rms_b = np.sqrt(np.mean(a[w] ** 2)), np.sqrt(np.mean(b[w] ** 2))
+                an, bn = a / (rms_a + 1e-30), b / (rms_b + 1e-30)
+                fa = nrms(an[w], bn[w])
+                full = nrms(a / (np.sqrt(np.mean(a ** 2)) + 1e-30), b / (np.sqrt(np.mean(b ** 2)) + 1e-30))
+                max_lag = int(round(0.5 / float(ref["freq"]) / dt)) + 2
+                rows.append({"comp": c, "shot": s, "rcv": r, "offset": float(ref["offset"][s, r]),
+                             "dt_eik": 1e3 * float(var["eik"][s, r] - ref["eik"][s, r]),
+                             "dt_fa": 1e3 * _xcorr_lag(an[w], bn[w], dt, max_lag),
+                             "nrms_fa": fa, "nrms": full, "rms_fa_ref": rms_a, "rms_fa_var": rms_b})
+    return rows
+
+
+def decay_exponent(rows: list[dict], which: str) -> float:
+    """Slope p of first-arrival RMS ~ offset^-p over all rows (log-log least squares)."""
+    off = np.array([r["offset"] for r in rows])
+    amp = np.array([r[which] for r in rows])
+    ok = amp > 0
+    return float(-np.polyfit(np.log(off[ok]), np.log(amp[ok]), 1)[0])
