@@ -1,4 +1,4 @@
-# Default metaparameters of the V1 dataset generator (see docs/dataset_design_v1.md).
+# Default metaparameters of the V1 dataset generator (see FA_Magic/docs/dataset_design_v1.md).
 #
 # A scalar is a fixed value. A dict with a `dist` key is a distribution, sampled
 # independently for every draw:

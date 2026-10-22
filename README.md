@@ -39,7 +39,7 @@ Re-picking without re-simulating: `python repick.py runs/homogeneous --threshold
 
 ## Dataset generator V1 (`fasim/gen`, `generate.py`)
 
-Implements `docs/dataset_design_v1.md`. Metaparameters live in `fasim/gen/defaults.yaml`
+Implements `../docs/dataset_design_v1.md` (project docs live in `FA_Magic/docs/`, outside this repo). Metaparameters live in `fasim/gen/defaults.yaml`
 (fixed values or distributions); override with `--meta my.yaml` or `--set key.path=value`.
 
 ```bash

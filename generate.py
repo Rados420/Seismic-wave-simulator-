@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""V1 dataset generator CLI (docs/dataset_design_v1.md).
+"""V1 dataset generator CLI (FA_Magic/docs/dataset_design_v1.md).
 
     python generate.py sample  --seed 17                      # print the drawn parameters (no models, no simulation)
     python generate.py paint   --seed 17 --dims 2             # build both wall variants and plot them (no simulation)
