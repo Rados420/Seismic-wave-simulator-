@@ -13,8 +13,6 @@ uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-Runs on the CPU (Apple Silicon wheel of Deepwave 0.0.27). Roughly 1 s/shot at
-dx = 0.2 m and 8 s/shot at dx = 0.1 m on an M4; the RTX server will be ~10-50x faster.
 
 ## Run
 
@@ -39,7 +37,7 @@ Re-picking without re-simulating: `python repick.py runs/homogeneous --threshold
 
 ## Dataset generator V1 (`fasim/gen`, `generate.py`)
 
-Implements `../docs/dataset_design_v1.md` (project docs live in `FA_Magic/docs/`, outside this repo). Metaparameters live in `fasim/gen/defaults.yaml`
+Metaparameters live in `fasim/gen/defaults.yaml`
 (fixed values or distributions); override with `--meta my.yaml` or `--set key.path=value`.
 
 ```bash
