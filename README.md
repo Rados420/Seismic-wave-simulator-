@@ -87,6 +87,17 @@ Use the `cu128` index or a newer one that matches the installed driver. If `gpu-
 "no kernel image", Deepwave's prebuilt CUDA kernels do not cover the card and Deepwave has to be
 built from source on the server.
 
+Overlapped generation (default, `sim.workers: 2`): CPU worker processes build the models and eikonal
+labels of the next draws while the GPU simulates the current one, and a writer thread saves finished
+draws. Output is identical to the sequential path (`--workers 0`). Files are written as `.h5.part` and
+renamed when complete, so `--skip-existing` resumes an interrupted run. Failed draws go to
+`failures.jsonl` and the run continues. The log reports how much of the wall time the propagation was
+busy; well below 100 % means more `--workers` are needed.
+
+```bash
+.venv/bin/python generate.py run --seed-range 0 1000 --dims 2 --no-figs --workers 4 --skip-existing
+```
+
 Tuning (`sim:` in `fasim/gen/defaults.yaml`): `bench` prints the measured memory per shot; if it is
 far from the estimate, adjust `memory_safety`. `chunk` fixes the shots per call. Small 2-D grids
 do not fill a GPU on their own: running two or three `generate.py run` processes with disjoint

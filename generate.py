@@ -54,6 +54,10 @@ def main():
     p.add_argument("--device", default=None, help="auto | cuda | cuda:N | cpu (default: sim.device)")
     p.add_argument("--chunk", type=int, default=None, help="shots per Deepwave call (default: fit to GPU memory)")
     p.add_argument("--no-figs", action="store_true")
+    p.add_argument("--workers", type=int, default=None,
+                   help="CPU processes preparing draws in parallel with the GPU (default: sim.workers; 0 = sequential)")
+    p.add_argument("--prefetch", type=int, default=None, help="extra prepared draws held ready (default: sim.prefetch)")
+    p.add_argument("--skip-existing", action="store_true", help="skip seeds whose output file already exists")
 
     p = sub.add_parser("gpu-info", help="check the CUDA / Deepwave set-up")
     p.add_argument("--device", default="auto")
@@ -118,12 +122,20 @@ def main():
         return
 
     if args.cmd == "run":
-        from fasim.gen.simulate import run_draw
         seeds = args.seeds or (list(range(*args.seed_range)) if args.seed_range else [0])
-        for s in seeds:
-            path = run_draw(meta, s, dims, out, device=args.device or meta["sim"]["device"], chunk=args.chunk)
-            if not args.no_figs:
-                from fasim.gen.plots import plot_compare
+        device = args.device or meta["sim"]["device"]
+        workers = meta["sim"]["workers"] if args.workers is None else args.workers
+        prefetch = meta["sim"]["prefetch"] if args.prefetch is None else args.prefetch
+        if workers > 0:
+            from fasim.gen.pipeline import run_pipeline
+            paths = run_pipeline(meta, seeds, dims, out, device, args.chunk, workers, prefetch, args.skip_existing)
+        else:
+            from fasim.gen.simulate import run_draw
+            paths = [run_draw(meta, s, dims, out, device=device, chunk=args.chunk) for s in seeds
+                     if not (args.skip_existing and (out / f"draw_{s:06d}.h5").exists())]
+        if not args.no_figs:
+            from fasim.gen.plots import plot_compare
+            for path in paths:
                 plot_compare(path, 0, "n")
 
 

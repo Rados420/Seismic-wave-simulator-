@@ -201,10 +201,9 @@ def eikonal(model: dict, dom: Domain, src: np.ndarray, rcv: np.ndarray) -> np.nd
 
 
 # --------------------------------------------------------------------------- #
-def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str = "auto",
-             chunk: int | None = None, verbose: bool = True) -> Path:
-    t_start = time.perf_counter()
-    device = resolve_device(device)
+def prepare_draw(meta: dict, seed: int, dims: int) -> dict:
+    """CPU stage: sample the draw, build every wall model, place receivers and shots, eikonal labels."""
+    t0 = time.perf_counter()
     params = sample_draw(meta, seed)
     walls, sources = meta["enumerate"]["walls"], meta["enumerate"]["sources"]
     dom, geom, models = build_variants(params, meta, dims, walls)
@@ -215,61 +214,74 @@ def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str 
     shot_shift = nudge_into_rock(shots, blocked, dom, geom, heights)
     dirs = impact_directions(params, geom, dims)
     cap = frequency_cap(models, meta, dom.dx)
-    if verbose:
-        print(f"[seed {seed}] {dims}-D grid {dom.shape} @ {dom.dx} m ({np.prod(dom.shape) / 1e6:.2f} M cells), "
-              f"{len(shots)} shots, {len(rcv)} receivers, frequency cap {cap:.0f} Hz, device {device}", flush=True)
+    freq = {src: min(params["sources"][src]["peak_freq"], cap) for src in sources}
+    eik = {w: eikonal(models[w], dom, shots, rcv) for w in walls} if meta["labels"]["eikonal"] else {}
+    keep = ("vp", "vs", "rho", "labels")                       # only what later stages need
+    return {"seed": seed, "dims": dims, "params": params, "dom": dom,
+            "models": {w: {k: models[w][k] for k in keep} for w in walls},
+            "rcv": rcv, "shots": shots, "is_virtual": is_virtual, "rcv_shift": rcv_shift, "shot_shift": shot_shift,
+            "dirs": dirs, "cap": cap, "freq": freq, "eikonal": eik, "t_prepare": time.perf_counter() - t0}
 
+
+def simulate_prepared(prep: dict, meta: dict, device: str, chunk: int | None = None, verbose: bool = True) -> dict:
+    """GPU stage: all (wall, source) variants of a prepared draw. Returns {wall: {source: (data, t, wav, sps)}}."""
+    t0 = time.perf_counter()
+    params, dom = prep["params"], prep["dom"]
+    sources = meta["enumerate"]["sources"]
+    out = {}
+    for w, m in prep["models"].items():
+        jobs = [{"name": src, "kind": SOURCE_KIND[src], "freq": prep["freq"][src],
+                 "amplitude": params["sources"][src]["amplitude"], "directions": prep["dirs"]} for src in sources]
+        groups = [jobs] if meta.get("sim", {}).get("combine_sources", True) else [[j] for j in jobs]
+        out[w] = {}
+        for grp in groups:
+            if verbose:
+                print(f"  [seed {prep['seed']}] wall {w}, sources " +
+                      ", ".join(f"{j['name']} {j['freq']:.0f} Hz" for j in grp), flush=True)
+            out[w].update(propagate_batch(m, dom, prep["shots"], prep["rcv"], grp, meta, device, chunk, verbose))
+    prep["t_simulate"] = time.perf_counter() - t0
+    return out
+
+
+def write_draw(prep: dict, results: dict, meta: dict, out_dir: str | Path, device_desc: str = "") -> Path:
+    """Write one draw to HDF5 (via a temporary file, renamed when complete) and append to index.jsonl."""
+    t0 = time.perf_counter()
+    seed, dims, params, dom = prep["seed"], prep["dims"], prep["params"], prep["dom"]
+    rcv, shots = prep["rcv"], prep["shots"]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"draw_{seed:06d}.h5"
+    tmp = path.with_suffix(".h5.part")
     st = meta["storage"]
     dtype = np.float16 if st["dtype"] == "float16" else np.float32
     comp = dict(compression="gzip", compression_opts=st["compression"]) if st["compression"] else {}
-    freq_used = {}
-    with h5py.File(path, "w") as h:
+    with h5py.File(tmp, "w") as h:
         h.attrs.update(seed=seed, dims=dims, params_json=json.dumps(params), meta_json=json.dumps(meta),
                        components=json.dumps(["p", "s", "n", "v"][:dims + 1]), torch=str(torch.__version__),
                        deepwave=str(deepwave._version.__version__), machine=str(platform.platform()),
-                       device=str(describe(device)))
+                       device=str(device_desc))
         g = h.create_group("geometry")
         g["origin"], g["dx"], g["shape"] = dom.origin, dom.dx, np.array(dom.shape)
-        g["rcv_pos"], g["rcv_is_virtual"], g["rcv_shift"] = rcv, is_virtual, rcv_shift
-        g["shot_pos"], g["shot_shift"], g["impact_dir"] = shots, shot_shift, dirs
+        g["rcv_pos"], g["rcv_is_virtual"], g["rcv_shift"] = rcv, prep["is_virtual"], prep["rcv_shift"]
+        g["shot_pos"], g["shot_shift"], g["impact_dir"] = shots, prep["shot_shift"], prep["dirs"]
         g["offset"] = np.linalg.norm(shots[:, None, :] - rcv[None, :, :], axis=-1)
-        for w in walls:
-            m = models[w]
+        for w, m in prep["models"].items():
             gw = h.create_group(f"wall_{w}")
             if st["models"]:
                 for k in ("vp", "vs", "rho"):
                     gw.create_dataset(k, data=m[k].astype(np.float16), **comp)
                 gw.create_dataset("labels", data=m["labels"], **comp)
-            if meta["labels"]["eikonal"]:
-                te = time.perf_counter()
-                gw["eikonal"] = eikonal(m, dom, shots, rcv)
-                if verbose:
-                    print(f"  wall {w}: eikonal {time.perf_counter() - te:.1f} s", flush=True)
-            jobs = []
-            for src in sources:
-                sp = params["sources"][src]
-                freq_used[src] = min(sp["peak_freq"], cap)
-                jobs.append({"name": src, "kind": SOURCE_KIND[src], "freq": freq_used[src],
-                             "amplitude": sp["amplitude"], "directions": dirs})
-            groups = [jobs] if meta.get("sim", {}).get("combine_sources", True) else [[j] for j in jobs]
-            results = {}
-            for grp in groups:
-                if verbose:
-                    print(f"  wall {w}, sources " + ", ".join(f"{j['name']} {j['freq']:.0f} Hz" for j in grp), flush=True)
-                results.update(propagate_batch(m, dom, shots, rcv, grp, meta, device, chunk, verbose))
-            for src in sources:
-                sp = params["sources"][src]
-                f = freq_used[src]
-                data, t, wav, sps = results[src]
+            if w in prep["eikonal"]:
+                gw["eikonal"] = prep["eikonal"][w]
+            for src, (data, t, wav, sps) in results[w].items():
                 gs = gw.create_group(src)
                 gs.create_dataset("data", data=data.astype(dtype), **comp)
                 gs["t"], gs["wavelet"] = t, wav
-                gs.attrs.update(peak_freq=f, peak_freq_requested=sp["peak_freq"], kind=SOURCE_KIND[src],
-                                seconds_per_shot=sps)
-        h.attrs["runtime_s"] = time.perf_counter() - t_start
+                gs.attrs.update(peak_freq=prep["freq"][src], peak_freq_requested=params["sources"][src]["peak_freq"],
+                                kind=SOURCE_KIND[src], seconds_per_shot=sps)
+        h.attrs.update(t_prepare=prep.get("t_prepare", 0.0), t_simulate=prep.get("t_simulate", 0.0))
+    tmp.replace(path)
+    t_write = time.perf_counter() - t0
 
     a = params["acquisition"]
     entry = {"seed": seed, "dims": dims, "file": path.name, "lithology": params["rock"]["host"]["name"],
@@ -277,9 +289,27 @@ def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str 
              "structures": [s["type"] for s in params["rock"]["structures"]],
              "curvature_h": params["tunnel"]["curvature_horizontal"], "curvature_v": params["tunnel"]["curvature_vertical"],
              "n_receivers": a["n_receivers"], "gap": round(a["gap"], 2), "shot_spacing": round(a["shot_spacing"], 3),
-             "freq": {k: round(v, 1) for k, v in freq_used.items()}, "runtime_s": round(time.perf_counter() - t_start, 1)}
-    with open(out_dir / "index.jsonl", "a") as fh:
+             "freq": {k: round(v, 1) for k, v in prep["freq"].items()},
+             "t_prepare": round(prep.get("t_prepare", 0.0), 1), "t_simulate": round(prep.get("t_simulate", 0.0), 1),
+             "t_write": round(t_write, 1)}
+    with open(out_dir / "index.jsonl", "a") as fh:                   # one short line per write: safe to share
         fh.write(json.dumps(entry) + "\n")
+    return path
+
+
+def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str = "auto",
+             chunk: int | None = None, verbose: bool = True) -> Path:
+    """Sequential: prepare, simulate and write one draw in this process."""
+    device = resolve_device(device)
+    t0 = time.perf_counter()
+    prep = prepare_draw(meta, seed, dims)
     if verbose:
-        print(f"  saved {path} ({path.stat().st_size / 1e6:.1f} MB) in {entry['runtime_s']} s", flush=True)
+        dom = prep["dom"]
+        print(f"[seed {seed}] {dims}-D grid {dom.shape} @ {dom.dx} m ({np.prod(dom.shape) / 1e6:.2f} M cells), "
+              f"{len(prep['shots'])} shots, {len(prep['rcv'])} receivers, frequency cap {prep['cap']:.0f} Hz, "
+              f"device {device}; prepared in {prep['t_prepare']:.1f} s", flush=True)
+    results = simulate_prepared(prep, meta, device, chunk, verbose)
+    path = write_draw(prep, results, meta, out_dir, describe(device))
+    if verbose:
+        print(f"  saved {path} ({path.stat().st_size / 1e6:.1f} MB) in {time.perf_counter() - t0:.1f} s", flush=True)
     return path
