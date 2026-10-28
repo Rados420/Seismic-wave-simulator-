@@ -17,6 +17,7 @@ from scipy.ndimage import map_coordinates
 
 from ..propagate import time_axis
 from .build import Domain, TunnelGeom, build_variants
+from .device import auto_chunk, describe, resolve_device, sync
 from .sampler import sample_draw
 
 SOURCE_KIND = {"explosive": "pressure", "impact": "force"}
@@ -72,57 +73,110 @@ def frequency_cap(models: dict, meta: dict, dx: float) -> float:
 
 
 # --------------------------------------------------------------------------- #
-def propagate(model: dict, dom: Domain, shot_pos: np.ndarray, rcv_pos: np.ndarray, kind: str, freq: float,
-              amplitude: float, directions: np.ndarray | None, meta: dict, device: str, chunk: int,
-              verbose: bool = True):
-    """Deepwave elastic, all shots. Returns data [shot, rcv, comp, nt] with comps (p, s, n[, v])."""
+def propagate_batch(model: dict, dom: Domain, shot_pos: np.ndarray, rcv_pos: np.ndarray, jobs: list[dict],
+                    meta: dict, device: str, chunk: int | None = None, verbose: bool = True) -> dict:
+    """Deepwave elastic for several source jobs on one model, batched into the same calls.
+
+    jobs: [{"name", "kind" ("pressure" | "force"), "freq", "amplitude", "directions" (force only)}].
+    Every job uses all shot positions; job j, shot k is batch entry j * n_shot + k. In each call a shot
+    carries a pressure and a force source, one of them with zero amplitude, so explosive and impact
+    shots share one call (fills the GPU better for small 2-D grids). Deepwave takes one PML frequency
+    per call: the mean of the jobs' peak frequencies.
+
+    Returns {name: (data [shot, rcv, comp, nt] with comps (p, s, n[, v]), t, wavelet, seconds per shot)}.
+    """
     dims = dom.dims
     dt = float(meta["record"]["dt"])
     nt = int(round(meta["record"]["length_ms"] * 1e-3 / dt))
-    peak_time = 1.5 / freq
+    names = DW_NAMES[-dims:]
+    n_shot, n_rcv = len(shot_pos), len(rcv_pos)
+    n_total = n_shot * len(jobs)
+
     # Deepwave sources are densities (force / volume, pressure rate per cell): divide by the cell
     # volume so the physical source strength, and the recorded amplitudes, do not depend on dx
-    wav = ricker(freq, nt, dt, peak_time) * amplitude / dom.dx ** dims
+    wavs = [ricker(j["freq"], nt, dt, 1.5 / j["freq"]) * j["amplitude"] / dom.dx ** dims for j in jobs]
+    W = torch.stack(wavs).to(device)                                   # [job, nt]
+    p_on = torch.tensor([1.0 if j["kind"] == "pressure" else 0.0 for j in jobs], device=device)
+    F = np.zeros((len(jobs), n_shot, dims), np.float32)                # force direction per job / shot
+    for i, j in enumerate(jobs):
+        if j["kind"] == "force":
+            F[i] = j["directions"]
+    F = torch.tensor(F, device=device)
+    any_p = bool(p_on.any())
+    any_f = bool(F.abs().sum() > 0)
+
     vp, vs, rho = (torch.tensor(model[k], device=device) for k in ("vp", "vs", "rho"))
     lamb, mu, buoy = vpvsrho_to_lambmubuoyancy(vp, vs, rho)
-    names = DW_NAMES[-dims:]
-    vmax = float(model["vp"].max())
+    vmax = float(model["vp"].max()) * 1.001     # margin: Deepwave recomputes vp from lambda, mu, rho in float32
+    pml_freq = float(np.mean([j["freq"] for j in jobs]))
 
-    rcv_idx = {None: dom.to_index(rcv_pos)[0]}
-    rcv_idx.update({d: dom.to_index(rcv_pos, d)[0] for d in range(dims)})
-    n_shot, n_rcv = len(shot_pos), len(rcv_pos)
-    data = np.zeros((n_shot, n_rcv, dims + 1, nt), np.float32)
+    def loc(idx):
+        return torch.tensor(idx, dtype=torch.long, device=device)
+
+    rcv_idx = {None: loc(dom.to_index(rcv_pos)[0])}
+    rcv_idx.update({d: loc(dom.to_index(rcv_pos, d)[0]) for d in range(dims)})
+    src_idx = {None: loc(dom.to_index(shot_pos)[0])}
+    src_idx.update({d: loc(dom.to_index(shot_pos, d)[0]) for d in range(dims)})
+
+    chunk = chunk or auto_chunk(dom.shape, meta, device, n_total)
+    out_data = np.zeros((len(jobs), n_shot, n_rcv, dims + 1, nt), np.float32)
+    sync(device)
     t0 = time.perf_counter()
-    for a in range(0, n_shot, chunk):
-        sl = slice(a, min(a + chunk, n_shot))
-        ns = sl.stop - sl.start
-
-        def loc(idx):
-            return torch.tensor(idx, dtype=torch.long, device=device)
-
-        kw = {"receiver_locations_p": loc(rcv_idx[None]).unsqueeze(0).repeat(ns, 1, 1)}
+    a = 0
+    while a < n_total:
+        b = min(a + chunk, n_total)
+        g = torch.arange(a, b, device=device)
+        jj, kk = g // n_shot, g % n_shot                                 # job and shot of each batch entry
+        ns = b - a
+        kw = {"receiver_locations_p": rcv_idx[None].unsqueeze(0).expand(ns, -1, -1).contiguous()}
         for d in range(dims):
-            kw[f"receiver_locations_{names[d]}"] = loc(rcv_idx[d]).unsqueeze(0).repeat(ns, 1, 1)
-        amp = wav.to(device).reshape(1, 1, nt).repeat(ns, 1, 1)
-        if kind == "pressure":
-            kw["source_amplitudes_p"] = amp
-            kw["source_locations_p"] = loc(dom.to_index(shot_pos[sl])[0]).unsqueeze(1)
-        else:
-            dirs = torch.tensor(directions[sl], dtype=amp.dtype, device=device)
+            kw[f"receiver_locations_{names[d]}"] = rcv_idx[d].unsqueeze(0).expand(ns, -1, -1).contiguous()
+        wav = W[jj]                                                      # [ns, nt]
+        if any_p:
+            kw["source_amplitudes_p"] = (wav * p_on[jj, None]).unsqueeze(1)
+            kw["source_locations_p"] = src_idx[None][kk].unsqueeze(1)
+        if any_f:
             for d in range(dims):
-                kw[f"source_amplitudes_{names[d]}"] = amp * dirs[:, d].reshape(ns, 1, 1)
-                kw[f"source_locations_{names[d]}"] = loc(dom.to_index(shot_pos[sl], d)[0]).unsqueeze(1)
-        with torch.no_grad():
-            out = deepwave.elastic(lamb, mu, buoy, dom.dx, dt, pml_width=meta["grid"]["pml_width"],
-                                   pml_freq=freq, accuracy=meta["grid"]["accuracy"], max_vel=vmax, **kw)
-        rec = out[-(dims + 1):]                                   # p, then velocity along dim 0..dims-1
+                kw[f"source_amplitudes_{names[d]}"] = (wav * F[jj, kk, d][:, None]).unsqueeze(1)
+                kw[f"source_locations_{names[d]}"] = src_idx[d][kk].unsqueeze(1)
+        try:
+            with torch.no_grad():
+                out = deepwave.elastic(lamb, mu, buoy, dom.dx, dt, pml_width=meta["grid"]["pml_width"],
+                                       pml_freq=pml_freq, accuracy=meta["grid"]["accuracy"], max_vel=vmax, **kw)
+        except torch.cuda.OutOfMemoryError:
+            if chunk == 1:
+                raise
+            del kw
+            torch.cuda.empty_cache()
+            chunk = max(1, chunk // 2)
+            if verbose:
+                print(f"      out of GPU memory, retrying with {chunk} shots per call", flush=True)
+            continue
+        rec = out[-(dims + 1):]                                          # p, then velocity along dim 0..dims-1
+        jn, kn = jj.cpu().numpy(), kk.cpu().numpy()
         for c, rr in enumerate(rec):
-            data[sl, :, c, :] = rr.cpu().numpy()
+            out_data[jn, kn, :, c, :] = rr.cpu().numpy()
+        del out, rec
         if verbose:
             el = time.perf_counter() - t0
-            print(f"      shots {sl.start}-{sl.stop - 1}: {el:.1f} s ({el / sl.stop:.2f} s/shot)", flush=True)
-    t = time_axis(nt, dt, peak_time, kind, "x")                  # velocity components; pressure lags dt/2 for force
-    return data, t, wav.numpy(), (time.perf_counter() - t0) / n_shot
+            print(f"      shots {a}-{b - 1} of {n_total} ({chunk} per call): {el:.1f} s ({el / b:.2f} s/shot)",
+                  flush=True)
+        a = b
+    sync(device)
+    sps = (time.perf_counter() - t0) / n_total
+    res = {}
+    for i, j in enumerate(jobs):
+        t = time_axis(nt, dt, 1.5 / j["freq"], j["kind"], "x")         # velocity comps; pressure lags dt/2 for force
+        res[j["name"]] = (out_data[i], t, wavs[i].numpy(), sps)
+    return res
+
+
+def propagate(model: dict, dom: Domain, shot_pos: np.ndarray, rcv_pos: np.ndarray, kind: str, freq: float,
+              amplitude: float, directions: np.ndarray | None, meta: dict, device: str, chunk: int | None,
+              verbose: bool = True):
+    """Single source type. Returns (data [shot, rcv, comp, nt], t, wavelet, seconds per shot)."""
+    job = {"name": "src", "kind": kind, "freq": freq, "amplitude": amplitude, "directions": directions}
+    return propagate_batch(model, dom, shot_pos, rcv_pos, [job], meta, device, chunk, verbose)["src"]
 
 
 def eikonal(model: dict, dom: Domain, src: np.ndarray, rcv: np.ndarray) -> np.ndarray:
@@ -147,9 +201,10 @@ def eikonal(model: dict, dom: Domain, src: np.ndarray, rcv: np.ndarray) -> np.nd
 
 
 # --------------------------------------------------------------------------- #
-def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str = "cpu",
+def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str = "auto",
              chunk: int | None = None, verbose: bool = True) -> Path:
     t_start = time.perf_counter()
+    device = resolve_device(device)
     params = sample_draw(meta, seed)
     walls, sources = meta["enumerate"]["walls"], meta["enumerate"]["sources"]
     dom, geom, models = build_variants(params, meta, dims, walls)
@@ -160,10 +215,9 @@ def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str 
     shot_shift = nudge_into_rock(shots, blocked, dom, geom, heights)
     dirs = impact_directions(params, geom, dims)
     cap = frequency_cap(models, meta, dom.dx)
-    chunk = chunk or (8 if dims == 2 else 2)
     if verbose:
         print(f"[seed {seed}] {dims}-D grid {dom.shape} @ {dom.dx} m ({np.prod(dom.shape) / 1e6:.2f} M cells), "
-              f"{len(shots)} shots, {len(rcv)} receivers, frequency cap {cap:.0f} Hz", flush=True)
+              f"{len(shots)} shots, {len(rcv)} receivers, frequency cap {cap:.0f} Hz, device {device}", flush=True)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -175,7 +229,8 @@ def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str 
     with h5py.File(path, "w") as h:
         h.attrs.update(seed=seed, dims=dims, params_json=json.dumps(params), meta_json=json.dumps(meta),
                        components=json.dumps(["p", "s", "n", "v"][:dims + 1]), torch=str(torch.__version__),
-                       deepwave=str(deepwave._version.__version__), machine=str(platform.platform()))
+                       deepwave=str(deepwave._version.__version__), machine=str(platform.platform()),
+                       device=str(describe(device)))
         g = h.create_group("geometry")
         g["origin"], g["dx"], g["shape"] = dom.origin, dom.dx, np.array(dom.shape)
         g["rcv_pos"], g["rcv_is_virtual"], g["rcv_shift"] = rcv, is_virtual, rcv_shift
@@ -193,14 +248,22 @@ def run_draw(meta: dict, seed: int, dims: int, out_dir: str | Path, device: str 
                 gw["eikonal"] = eikonal(m, dom, shots, rcv)
                 if verbose:
                     print(f"  wall {w}: eikonal {time.perf_counter() - te:.1f} s", flush=True)
+            jobs = []
             for src in sources:
                 sp = params["sources"][src]
-                f = min(sp["peak_freq"], cap)
-                freq_used[src] = f
+                freq_used[src] = min(sp["peak_freq"], cap)
+                jobs.append({"name": src, "kind": SOURCE_KIND[src], "freq": freq_used[src],
+                             "amplitude": sp["amplitude"], "directions": dirs})
+            groups = [jobs] if meta.get("sim", {}).get("combine_sources", True) else [[j] for j in jobs]
+            results = {}
+            for grp in groups:
                 if verbose:
-                    print(f"  wall {w}, source {src}: {f:.0f} Hz", flush=True)
-                data, t, wav, sps = propagate(m, dom, shots, rcv, SOURCE_KIND[src], f, sp["amplitude"],
-                                              dirs, meta, device, chunk, verbose)
+                    print(f"  wall {w}, sources " + ", ".join(f"{j['name']} {j['freq']:.0f} Hz" for j in grp), flush=True)
+                results.update(propagate_batch(m, dom, shots, rcv, grp, meta, device, chunk, verbose))
+            for src in sources:
+                sp = params["sources"][src]
+                f = freq_used[src]
+                data, t, wav, sps = results[src]
                 gs = gw.create_group(src)
                 gs.create_dataset("data", data=data.astype(dtype), **comp)
                 gs["t"], gs["wavelet"] = t, wav

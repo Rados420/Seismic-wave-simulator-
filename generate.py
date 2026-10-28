@@ -5,6 +5,8 @@
     python generate.py paint   --seed 17 --dims 2             # build both wall variants and plot them (no simulation)
     python generate.py run     --seeds 17 18 --dims 2         # simulate all wall x source variants, write HDF5
     python generate.py compare runs/gen/2d/draw_000017.h5 --rcv 0 --comp n
+    python generate.py gpu-info                               # what torch sees; tiny GPU-vs-CPU Deepwave check
+    python generate.py bench   --seed 0 --dims 2              # time one draw's propagation (bare wall, both sources)
 
 Common options: --meta my.yaml (overrides on top of fasim/gen/defaults.yaml),
 --set path.to.key=value (repeatable, value parsed as YAML), --out runs/gen.
@@ -49,9 +51,21 @@ def main():
     p.add_argument("--seeds", type=int, nargs="+", default=None)
     p.add_argument("--seed-range", type=int, nargs=2, default=None, metavar=("FIRST", "STOP"))
     p.add_argument("--dims", type=int, choices=[2, 3], default=None)
-    p.add_argument("--device", default="cpu")
-    p.add_argument("--chunk", type=int, default=None, help="shots per Deepwave call")
+    p.add_argument("--device", default=None, help="auto | cuda | cuda:N | cpu (default: sim.device)")
+    p.add_argument("--chunk", type=int, default=None, help="shots per Deepwave call (default: fit to GPU memory)")
     p.add_argument("--no-figs", action="store_true")
+
+    p = sub.add_parser("gpu-info", help="check the CUDA / Deepwave set-up")
+    p.add_argument("--device", default="auto")
+
+    p = sub.add_parser("bench", help="time the propagation of one draw (bare wall, all sources)")
+    _common(p)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dims", type=int, choices=[2, 3], default=None)
+    p.add_argument("--device", default=None)
+    p.add_argument("--chunk", type=int, default=None)
+    p.add_argument("--compare-cpu", type=int, default=0, metavar="N",
+                   help="also run the first N shots on the CPU and report the difference")
 
     p = sub.add_parser("compare", help="plot all variants of a simulated draw")
     p.add_argument("h5")
@@ -60,6 +74,10 @@ def main():
     p.add_argument("--tmax-ms", type=float, default=None)
 
     args = ap.parse_args()
+
+    if args.cmd == "gpu-info":
+        from fasim.gen.device import environment_check
+        raise SystemExit(0 if environment_check(args.device) else 1)
 
     if args.cmd == "compare":
         from fasim.gen.plots import plot_compare
@@ -95,14 +113,66 @@ def main():
                   f"built in {time.perf_counter() - t0:.1f} s -> {path}")
         return
 
+    if args.cmd == "bench":
+        bench(meta, args.seed, dims, args.device or meta["sim"]["device"], args.chunk, args.compare_cpu)
+        return
+
     if args.cmd == "run":
         from fasim.gen.simulate import run_draw
         seeds = args.seeds or (list(range(*args.seed_range)) if args.seed_range else [0])
         for s in seeds:
-            path = run_draw(meta, s, dims, out, device=args.device, chunk=args.chunk)
+            path = run_draw(meta, s, dims, out, device=args.device or meta["sim"]["device"], chunk=args.chunk)
             if not args.no_figs:
                 from fasim.gen.plots import plot_compare
                 plot_compare(path, 0, "n")
+
+
+def bench(meta, seed, dims, device, chunk, compare_cpu):
+    """Propagation timing of one draw on the bare-wall model, all source types batched together."""
+    import numpy as np
+    import torch
+    from fasim.gen.build import build_variants
+    from fasim.gen.device import auto_chunk, bytes_per_shot, describe, is_cuda, padded_cells, resolve_device
+    from fasim.gen.simulate import (SOURCE_KIND, frequency_cap, impact_directions, nudge_into_rock, positions,
+                                    propagate_batch)
+    device = resolve_device(device)
+    prm = sample_draw(meta, seed)
+    t0 = time.perf_counter()
+    dom, geom, models = build_variants(prm, meta, dims, ["bare"])
+    m = models["bare"]
+    rcv, shots, _, heights = positions(prm, geom)
+    blocked = m["excavated"] | (m["labels"] == 6)
+    nudge_into_rock(rcv, blocked, dom, geom, None)
+    nudge_into_rock(shots, blocked, dom, geom, heights)
+    t_build = time.perf_counter() - t0
+    cap = frequency_cap(models, meta, dom.dx)
+    jobs = [{"name": s, "kind": SOURCE_KIND[s], "freq": min(prm["sources"][s]["peak_freq"], cap),
+             "amplitude": prm["sources"][s]["amplitude"], "directions": impact_directions(prm, geom, dims)}
+            for s in meta["enumerate"]["sources"]]
+    n_total = len(shots) * len(jobs)
+    ch = chunk or auto_chunk(dom.shape, meta, device, n_total)
+    print(f"device   : {device}: {describe(device)}")
+    print(f"grid     : {dims}-D {dom.shape} @ {dom.dx} m = {np.prod(dom.shape) / 1e6:.2f} M cells "
+          f"({padded_cells(dom.shape, meta) / 1e6:.2f} M with PML), model build {t_build:.1f} s")
+    print(f"batch    : {n_total} shots ({len(shots)} x {len(jobs)} sources), {ch} per call, "
+          f"estimated {bytes_per_shot(dom.shape, meta) / 2**20:.0f} MB per shot")
+    if is_cuda(device):
+        torch.cuda.reset_peak_memory_stats(device)
+    res = propagate_batch(m, dom, shots, rcv, jobs, meta, device, ch, verbose=True)
+    sps = next(iter(res.values()))[3]
+    print(f"result   : {sps:.3f} s per shot, {sps * n_total:.1f} s for the batch, "
+          f"{sps * n_total * len(meta['enumerate']['walls']):.1f} s per draw (all walls)")
+    if is_cuda(device):
+        peak = torch.cuda.max_memory_allocated(device)
+        print(f"memory   : peak {peak / 2**30:.2f} GB, {peak / min(ch, n_total) / 2**20:.0f} MB per shot in the batch")
+    if compare_cpu:
+        k = min(compare_cpu, len(shots))
+        ref = propagate_batch(m, dom, shots[:k], rcv, [dict(j, directions=j["directions"][:k]) for j in jobs],
+                              meta, "cpu", None, verbose=False)
+        for j in jobs:
+            a, b = res[j["name"]][0][:k], ref[j["name"]][0]
+            err = float(np.abs(a - b).max() / (np.abs(b).max() + 1e-30))
+            print(f"vs cpu   : {j['name']}: max relative difference {err:.1e} over {k} shots")
 
 
 if __name__ == "__main__":

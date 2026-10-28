@@ -63,3 +63,31 @@ EDZ, texture, hammer direction, domain size, grid density and 2-D vs 3-D on the 
 with conclusions at the end. Helpers in `fasim/gen/experiments.py` (`run_variant` caches each
 simulation in `runs/experiments/`, `compare` and `fa_visibility` compute the measures).
 Running it from scratch takes about 45 min on an M4 CPU; with the cache it only re-plots.
+
+## GPU
+
+Wave propagation runs on a CUDA GPU through Deepwave; model building, eikonal labels and file
+writing stay on the CPU (a few seconds per draw). `--device auto` (default, `sim.device`) picks the
+GPU when torch sees one. Shots are batched into as few Deepwave calls as fit in GPU memory, and
+explosive and impact shots share the same calls (`sim.combine_sources`). On out-of-memory the batch
+is halved and retried.
+
+Server set-up (Linux, NVIDIA driver recent enough for the card; Blackwell needs CUDA 12.8 or newer):
+
+```bash
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv/bin/python -e .
+.venv/bin/python generate.py gpu-info                               # device, memory, tiny GPU-vs-CPU check
+.venv/bin/python generate.py bench --seed 0 --dims 2 --compare-cpu 2  # s/shot, peak memory, CPU agreement
+.venv/bin/python generate.py bench --seed 0 --dims 3 --compare-cpu 1
+```
+
+Use the `cu128` index or a newer one that matches the installed driver. If `gpu-info` reports
+"no kernel image", Deepwave's prebuilt CUDA kernels do not cover the card and Deepwave has to be
+built from source on the server.
+
+Tuning (`sim:` in `fasim/gen/defaults.yaml`): `bench` prints the measured memory per shot; if it is
+far from the estimate, adjust `memory_safety`. `chunk` fixes the shots per call. Small 2-D grids
+do not fill a GPU on their own: running two or three `generate.py run` processes with disjoint
+`--seed-range` values on the same GPU raises throughput; they can share one output directory.

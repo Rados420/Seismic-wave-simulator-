@@ -138,6 +138,13 @@ rock:
       corr_length: {dist: uniform, low: 0.2, high: 0.6}
       hurst: 0.2
 
+sim:                             # how simulations run (does not change the physics)
+  device: auto                   # auto = CUDA GPU if available, else cpu; or cuda, cuda:1, cpu
+  combine_sources: true          # explosive and impact shots in the same Deepwave calls
+  chunk: null                    # shots per call; null = fit to free GPU memory (GPU) or 8 / 2 (CPU, 2-D / 3-D)
+  memory_fraction: 0.7           # share of free GPU memory used for one call
+  memory_safety: 2.0             # multiplier on the estimated memory per shot
+
 labels:
   eikonal: true                  # fast-marching traveltime per wall variant
 
