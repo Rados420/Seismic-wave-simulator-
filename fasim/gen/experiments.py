@@ -49,7 +49,7 @@ def _key(*objs) -> str:
 
 
 def run_variant(params: dict, meta: dict, dims: int = 2, wall: str = "bare", source: str = "impact",
-                freq: float | None = None, device: str = "cpu", chunk: int | None = None,
+                freq: float | None = None, device: str = "auto", chunk: int | None = None,
                 cache_dir: str | Path = "runs/experiments", verbose: bool = True, label: str = "") -> dict:
     """Simulate one (wall, source) variant of a draw. Results are cached by a hash of all inputs."""
     sim_meta = {k: meta[k] for k in ("grid", "record", "domain", "rock")}
@@ -76,7 +76,8 @@ def run_variant(params: dict, meta: dict, dims: int = 2, wall: str = "bare", sou
     dirs = impact_directions(params, geom, dims)
     cap = frequency_cap({wall: model}, meta, dom.dx)
     f = float(freq) if freq else min(params["sources"][source]["peak_freq"], cap)
-    chunk = chunk or (len(shots) if dims == 2 else 2)
+    from .device import resolve_device
+    device = resolve_device(device)
     data, t, wav, sps = propagate(model, dom, shots, rcv, SOURCE_KIND[source], f,
                                   params["sources"][source]["amplitude"], dirs, meta, device, chunk, verbose=False)
     eik = eikonal(model, dom, shots, rcv)
