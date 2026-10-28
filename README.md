@@ -1,104 +1,97 @@
-# fasim — prototype tunnel-seismic simulator (2-D plan view)
+# fasim
 
-Hand-tunable prototype for generating synthetic first-arrival training data
-for the tunnel-seismic picking project. It is deliberately small: paint a
-vp/vs/rho model with a tunnel cavity, shoot Deepwave's elastic propagator,
-compute two labels per trace (eikonal traveltime and observable onset), save
-everything to HDF5 and make figures. Everything is a knob in one YAML file.
+Simulates seismic recordings in a tunnel. The output is training data for a model that picks
+**first arrivals**: the time at which the first wave from a shot reaches a sensor.
 
-## Setup
+## Concepts
+
+- **Draw**: one simulated example. It has a random tunnel, rock, sensor line and shot line.
+  Each draw has an integer **seed**, and the same seed always gives the same draw.
+- Each draw is simulated **4 times**: for 2 wall types (concrete-lined or bare rock) and
+  2 sources (an explosive charge in a borehole, or a hammer blow on the wall).
+- **2-D or 3-D**: 2-D is a horizontal slice through the rock at sensor height and is the default.
+  3-D is much slower.
+- **Label**: the true first-arrival time for every shot–sensor pair. It is computed from the rock
+  model, not picked from the waveforms.
+
+## Install
 
 ```bash
 uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-
-## Run
-
-```bash
-.venv/bin/python run_experiment.py --config configs/homogeneous.yaml
-.venv/bin/python run_experiment.py --config configs/homogeneous_hires.yaml --no-tunnel --name sanity_notunnel_hires  # the kept sanity run
-.venv/bin/python run_experiment.py --config configs/homogeneous.yaml --source pressure           # explosive
-.venv/bin/python run_experiment.py --config configs/homogeneous.yaml --shots 8 --dx 0.4 --freq 300  # quick look
-.venv/bin/python plot_configs.py --field vp                                                      # vp maps of all configs
-```
-
-Output goes to `runs/<name>/`: `config.yaml` (resolved config), `run.h5`,
-`model_vp.png`, `gather_<RCV>.png` (receiver gathers, all three components,
-blue = eikonal + wavelet onset, red = picked onset), `delay_vs_offset.png`,
-`snapshots_vx.png`.
-
-CLI overrides: `--shots N --dx --freq --source force|pressure --no-tunnel
---picker --threshold-ref trace|gather|window --rel-threshold --component y|x|p|vec --record-ms`.
-
-Re-picking without re-simulating: `python repick.py runs/homogeneous --threshold-ref gather --suffix _gatherref`
-(add `--write-h5` to overwrite the stored labels) or interactively in `notebooks/00_explore_run.ipynb`.
-
-## Dataset generator V1 (`fasim/gen`, `generate.py`)
-
-Metaparameters live in `fasim/gen/defaults.yaml`
-(fixed values or distributions); override with `--meta my.yaml` or `--set key.path=value`.
+On an NVIDIA GPU server, install the CUDA build of torch first. Blackwell cards need CUDA 12.8 or newer:
 
 ```bash
-.venv/bin/python generate.py sample --seed 0 1 2            # drawn parameters, no simulation
-.venv/bin/python generate.py paint  --seed 2 --dims 2       # build and plot both wall variants, no simulation
-.venv/bin/python generate.py paint  --seed 2 --dims 3 --set grid.dx_3d=0.4
-.venv/bin/python generate.py run    --seeds 2 --dims 2      # simulate wall x source, write runs/gen/2d/draw_000002.h5
-.venv/bin/python generate.py compare runs/gen/2d/draw_000002.h5 --rcv 0 1 --comp n
-```
-
-Quick, cheap test runs: `--set grid.dx_2d=0.2 --set acquisition.n_shots=6 --set record.length_ms=20`.
-
-Per draw, one HDF5 file: `params_json` (every drawn value and field seed, enough to rebuild the
-models), `meta_json`, `geometry/` (receiver and shot positions, impact directions, offsets),
-and `wall_<concrete|bare>/` with the models (float16), the eikonal traveltimes and one group per
-source (`data[shot, rcv, comp, t]` with comps p, s, n[, v], `t`, `wavelet`). `index.jsonl` in the
-output directory lists the draws with their main parameters for slicing.
-
-## Experiments
-
-`notebooks/01_factor_influence.ipynb`: one-factor-at-a-time influence of wall, curvature, roughness,
-EDZ, texture, hammer direction, domain size, grid density and 2-D vs 3-D on the simulated gathers,
-with conclusions at the end. Helpers in `fasim/gen/experiments.py` (`run_variant` caches each
-simulation in `runs/experiments/`, `compare` and `fa_visibility` compute the measures).
-Running it from scratch takes about 45 min on an M4 CPU; with the cache it only re-plots.
-
-## GPU
-
-Wave propagation runs on a CUDA GPU through Deepwave; model building, eikonal labels and file
-writing stay on the CPU (a few seconds per draw). `--device auto` (default, `sim.device`) picks the
-GPU when torch sees one. Shots are batched into as few Deepwave calls as fit in GPU memory, and
-explosive and impact shots share the same calls (`sim.combine_sources`). On out-of-memory the batch
-is halved and retried.
-
-Server set-up (Linux, NVIDIA driver recent enough for the card; Blackwell needs CUDA 12.8 or newer):
-
-```bash
-uv venv --python 3.13 .venv
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python .venv/bin/python -e .
-.venv/bin/python generate.py gpu-info                               # device, memory, tiny GPU-vs-CPU check
-.venv/bin/python generate.py bench --seed 0 --dims 2 --compare-cpu 2  # s/shot, peak memory, CPU agreement
-.venv/bin/python generate.py bench --seed 0 --dims 3 --compare-cpu 1
 ```
 
-Use the `cu128` index or a newer one that matches the installed driver. If `gpu-info` reports
-"no kernel image", Deepwave's prebuilt CUDA kernels do not cover the card and Deepwave has to be
-built from source on the server.
-
-Overlapped generation (default, `sim.workers: 2`): CPU worker processes build the models and eikonal
-labels of the next draws while the GPU simulates the current one, and a writer thread saves finished
-draws. Output is identical to the sequential path (`--workers 0`). Files are written as `.h5.part` and
-renamed when complete, so `--skip-existing` resumes an interrupted run. Failed draws go to
-`failures.jsonl` and the run continues. The log reports how much of the wall time the propagation was
-busy; well below 100 % means more `--workers` are needed.
+## Try it
 
 ```bash
-.venv/bin/python generate.py run --seed-range 0 1000 --dims 2 --no-figs --workers 4 --skip-existing
+.venv/bin/python generate.py sample --seed 0                                   # print the random parameters of draw 0
+.venv/bin/python generate.py paint --seed 0                                    # plot its rock models (PNG)
+.venv/bin/python generate.py run --seeds 0 --set grid.dx_2d=0.2 --set acquisition.n_shots=4   # quick small simulation
+.venv/bin/python generate.py compare runs/gen/2d/draw_000000.h5 --rcv 0        # plot the 4 versions at sensor 0
 ```
 
-Tuning (`sim:` in `fasim/gen/defaults.yaml`): `bench` prints the measured memory per shot; if it is
-far from the estimate, adjust `memory_safety`. `chunk` fixes the shots per call. Small 2-D grids
-do not fill a GPU on their own: running two or three `generate.py run` processes with disjoint
-`--seed-range` values on the same GPU raises throughput; they can share one output directory.
+Output goes to `runs/gen/2d/` (`runs/gen/3d/` with `--dims 3`).
+
+## Generate a dataset
+
+```bash
+.venv/bin/python generate.py run --seed-range 0 1000 --no-figs --skip-existing   # draws 0 to 999
+```
+
+- `--skip-existing` skips draws that are already done, so an interrupted run can be restarted
+  with the same command.
+- `--device cpu|cuda` sets the device. By default the GPU is used if one is found.
+- `--workers N` sets how many CPU processes prepare the next draws while the current one is simulated.
+  If the log shows "propagation busy" well below 100 %, increase N.
+- Failed draws are listed in `failures.jsonl` and the run continues.
+
+To check a GPU server:
+
+```bash
+.venv/bin/python generate.py gpu-info                                  # is the GPU visible and working
+.venv/bin/python generate.py bench --seed 0 --compare-cpu 2            # seconds per shot, GPU vs CPU result
+```
+
+## Changing parameters
+
+All parameters are in [fasim/gen/defaults.yaml](fasim/gen/defaults.yaml). Each one is either a fixed
+value or a random range. You can override them for one run:
+
+```bash
+--set record.length_ms=20               # one value
+--meta my_settings.yaml                 # a YAML file with only the values you change
+```
+
+## Output file
+
+One HDF5 file per draw, `draw_<seed>.h5`. Times are in seconds and positions in metres.
+
+| Path | Content |
+|---|---|
+| `geometry/rcv_pos`, `geometry/shot_pos` | sensor and shot positions |
+| `wall_<concrete\|bare>/<explosive\|impact>/data` | recordings, `[shot, sensor, component, time]` |
+| `wall_…/<source>/t` | time axis |
+| `wall_…/eikonal` | first-arrival label, `[shot, sensor]` |
+| `wall_…/vp`, `vs`, `rho` | rock model: P and S velocity, density |
+
+Components: `p` pressure; `s`, `n` (and `v` in 3-D) particle velocity along the tunnel,
+into the rock and vertically. `index.jsonl` in the output folder lists all draws with their
+main parameters.
+
+## Code
+
+| Path | Content |
+|---|---|
+| `generate.py` | command line |
+| `fasim/gen/sampler.py` | draws the random parameters |
+| `fasim/gen/build.py` | builds the tunnel and rock models |
+| `fasim/gen/simulate.py` | wave simulation (Deepwave) and labels |
+| `fasim/gen/pipeline.py`, `device.py` | parallel runs and GPU handling |
+| `notebooks/` | experiments on which parameters change the data |
+| `run_experiment.py`, `configs/`, other `fasim/*.py` | older single-scenario prototype |
